@@ -129,6 +129,7 @@ class MDCNA_CDT {
             }
 
             self::log( "FF Submission received. entry_id={$entry_id}" );
+            self::log( "Raw form_data keys: " . implode( ', ', array_keys( $form_data ) ) );
 
             // ── Extract fields ────────────────────────────────
             $first_name = sanitize_text_field( $form_data['names_1']['first_name'] ?? $form_data['names']['first_name'] ?? $form_data['first_name'] ?? '' );
@@ -136,8 +137,54 @@ class MDCNA_CDT {
             $email      = sanitize_email( $form_data['email_1'] ?? $form_data['email'] ?? '' );
             $phone      = sanitize_text_field( $form_data['phone_1'] ?? $form_data['phone_mobile'] ?? $form_data['phone'] ?? '' );
             $datetime   = sanitize_text_field( $form_data['datetime'] ?? '' );
-            $qty        = absint( $form_data['quantity'] ?? 1 );
-            $donation   = floatval( $form_data['optional_donation'] ?? 0 );
+
+            // ── Registration quantity ─────────────────────────
+            // Fluent Forms payment item quantity field
+            $qty = absint(
+                $form_data['item-quantity']     ??   // payment item quantity
+                $form_data['payment_input_1']   ??   // alternate payment input
+                $form_data['quantity']          ??
+                1
+            );
+
+            // ── Donation ──────────────────────────────────────
+            // custom_payment_amount_donation is the optional donation field
+            $donation_raw = $form_data['custom_payment_amount_donation'] ?? $form_data['optional_donation'] ?? 0;
+            $donation     = floatval( str_replace( [ '$', ',' ], '', $donation_raw ) );
+
+            // ── Merch — map payment fields to internal keys ───
+            $merch = [];
+
+            // T-Shirt: check payment field + quantity
+            $tshirt_qty = absint( $form_data['item_quantity_t_shirt'] ?? 0 );
+            if ( ! empty( $form_data['payment_t_shirt'] ) || $tshirt_qty > 0 ) {
+                $merch['e_shirt'] = [
+                    'qty'  => $tshirt_qty ?: 1,
+                    'size' => sanitize_text_field( $form_data['t_shirt_size'] ?? '' ),
+                ];
+            }
+
+            // Baseball Cap
+            $cap_qty = absint( $form_data['item_quantity_baseball_cap'] ?? 0 );
+            if ( ! empty( $form_data['payment_input_baseball_cap'] ) || $cap_qty > 0 ) {
+                $merch['baseball_cap'] = [ 'qty' => $cap_qty ?: 1 ];
+            }
+
+            // Tote Bag
+            $tote_qty = absint( $form_data['item_quantity_tote_bag'] ?? 0 );
+            if ( ! empty( $form_data['payment_input_tote_bag'] ) || $tote_qty > 0 ) {
+                $merch['tote_bag'] = [ 'qty' => $tote_qty ?: 1 ];
+            }
+
+            // Water Bottle
+            $bottle_qty = absint( $form_data['item_quantity_water_bottle'] ?? 0 );
+            if ( ! empty( $form_data['payment_input_water_bottle'] ) || $bottle_qty > 0 ) {
+                $merch['water_bottle'] = [ 'qty' => $bottle_qty ?: 1 ];
+            }
+
+            // Payment method (log it)
+            $payment_method = sanitize_text_field( $form_data['payment_method'] ?? 'unknown' );
+            self::log( "Payment method: {$payment_method} | qty: {$qty} | donation: {$donation} | merch: " . wp_json_encode( $merch ) );
 
             // ── Parse clean date ──────────────────────────────
             $clean_date = self::parse_clean_date( $datetime );
@@ -145,15 +192,6 @@ class MDCNA_CDT {
                 self::log( "ERROR: Could not parse clean_date '{$datetime}' for entry {$entry_id}", 'error' );
                 self::notify_admin_error( "Could not parse clean date for entry #{$entry_id}. Raw value: '{$datetime}'" );
                 return;
-            }
-
-            // ── Merch items ───────────────────────────────────
-            $merch = [];
-            $merch_keys = [ 'e_shirt', 'baseball_cap', 'tote_bag', 'water_bottle' ];
-            foreach ( $merch_keys as $k ) {
-                if ( ! empty( $form_data[ $k ] ) ) {
-                    $merch[ $k ] = $form_data[ $k ];
-                }
             }
 
             // ── Match / create WP user ────────────────────────
@@ -547,7 +585,7 @@ class MDCNA_CDT {
     // Merch key → pretty label
     private static function merch_label( string $key ): string {
         return [
-            'e_shirt'      => 'E-Shirt',
+            'e_shirt'      => 'T-Shirt',
             'baseball_cap' => 'Baseball Cap',
             'tote_bag'     => 'Tote Bag',
             'water_bottle' => 'Water Bottle',
@@ -915,13 +953,13 @@ class MDCNA_CDT {
                 <?php // Bar: Registrants by Clean Year ?>
                 <div class="mdcna-chart-box" style="flex:2">
                     <h3>Registrants by Clean Year</h3>
-                    <canvas id="mdcna-year-chart" height="200"></canvas>
+                    <canvas id="mdcna-year-chart" height="120"></canvas>
                 </div>
 
                 <?php // Donut: Clean Time Distribution ?>
                 <div class="mdcna-chart-box" style="flex:1;min-width:260px">
                     <h3>Clean Time Distribution</h3>
-                    <canvas id="mdcna-donut-chart" height="200"></canvas>
+                    <canvas id="mdcna-donut-chart" height="120"></canvas>
                     <div id="mdcna-donut-legend" style="margin-top:10px;font-size:12px"></div>
                 </div>
 
@@ -950,7 +988,7 @@ class MDCNA_CDT {
                 <?php // Merch chart ?>
                 <div class="mdcna-chart-box" style="flex:1">
                     <h3>Merch Orders</h3>
-                    <canvas id="mdcna-merch-chart" height="180"></canvas>
+                    <canvas id="mdcna-merch-chart" height="120"></canvas>
                 </div>
 
                 <?php // Revenue breakdown ?>
@@ -1064,7 +1102,7 @@ class MDCNA_CDT {
             new Chart(document.getElementById('mdcna-merch-chart'), {
                 type: 'bar',
                 data: {
-                    labels: ['E-Shirt', 'Baseball Cap', 'Tote Bag', 'Water Bottle'],
+                    labels: ['T-Shirt', 'Baseball Cap', 'Tote Bag', 'Water Bottle'],
                     datasets: [{
                         label: 'Orders',
                         data: <?php echo $merch_data; ?>,
