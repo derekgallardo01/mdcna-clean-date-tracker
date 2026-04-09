@@ -919,7 +919,7 @@ class MDCNA_CDT {
         $total_days        = (int) $wpdb->get_var( "SELECT SUM(DATEDIFF(CURDATE(), clean_date)) FROM {$table} WHERE status='active'" );
         $avg_days          = $total_registrants ? round( $total_days / $total_registrants ) : 0;
         $total_donations   = (float) $wpdb->get_var( "SELECT SUM(donation) FROM {$table} WHERE status='active'" );
-        $total_revenue     = (float) $wpdb->get_var( "SELECT SUM(qty * 30) FROM {$table} WHERE status='active'" );
+        $total_revenue     = (float) $wpdb->get_var( "SELECT SUM(qty * 35) FROM {$table} WHERE status='active'" );
         $total_merch_rev   = (float) $wpdb->get_var( "SELECT SUM(
             (JSON_UNQUOTE(JSON_EXTRACT(merch_json, '$.e_shirt')) IS NOT NULL AND JSON_UNQUOTE(JSON_EXTRACT(merch_json, '$.e_shirt')) != 'null') * 25 +
             (JSON_UNQUOTE(JSON_EXTRACT(merch_json, '$.baseball_cap')) IS NOT NULL AND JSON_UNQUOTE(JSON_EXTRACT(merch_json, '$.baseball_cap')) != 'null') * 15 +
@@ -976,7 +976,7 @@ class MDCNA_CDT {
                     [ 'label' => 'Total Days Clean',     'value' => number_format( $total_days ),        'icon' => '', 'sub' => number_format( $total_days / 365, 1 ) . ' combined years' ],
                     [ 'label' => 'Avg Days Per Person',  'value' => number_format( $avg_days ),          'icon' => '', 'sub' => self::format_clean_time( $avg_days ) . ' avg' ],
                     [ 'label' => 'Total Donations',      'value' => '$' . number_format( $total_donations, 2 ), 'icon' => '', 'sub' => '100% to event costs' ],
-                    [ 'label' => 'Reg. Revenue',         'value' => '$' . number_format( $total_revenue, 2 ),   'icon' => '', 'sub' => '$30 × ' . $total_registrants . ' registrants' ],
+                    [ 'label' => 'Reg. Revenue',         'value' => '$' . number_format( $total_revenue, 2 ),   'icon' => '', 'sub' => '$35 × ' . $total_registrants . ' registrants' ],
                     [ 'label' => 'Total Revenue',        'value' => '$' . number_format( $total_donations + $total_revenue, 2 ), 'icon' => '', 'sub' => 'donations + registrations' ],
                 ];
                 foreach ( $stats as $s ) : ?>
@@ -1535,6 +1535,17 @@ class MDCNA_CDT {
             "SELECT COALESCE(SUM(donation), 0) FROM {$table} WHERE status='active' AND donation > 0"
         );
 
+        // New revenue in period (registrations × $35)
+        $new_revenue = (float) $wpdb->get_var(
+            "SELECT COALESCE(SUM(qty * 35), 0) FROM {$table} WHERE status='active' {$date_condition}"
+        );
+
+        // Total revenue (registrations × $35 + donations)
+        $total_revenue = (float) $wpdb->get_var(
+            "SELECT COALESCE(SUM(qty * 35), 0) FROM {$table} WHERE status='active'"
+        );
+        $total_revenue_all = $total_revenue + $total_donations;
+
         // New registrants list
         $new_rows = $wpdb->get_results(
             "SELECT first_name, last_name, email, clean_date, qty, donation, created_at
@@ -1548,6 +1559,8 @@ class MDCNA_CDT {
             'total_registrations' => $total_registrations,
             'new_donations'       => $new_donations,
             'total_donations'     => $total_donations,
+            'new_revenue'         => $new_revenue,
+            'total_revenue'       => $total_revenue_all,
             'new_rows'            => $new_rows,
         ];
     }
@@ -1574,8 +1587,10 @@ class MDCNA_CDT {
             $registrant_rows = '<tr><td colspan="5" style="padding:12px;text-align:center;color:#999">No new registrations for this period.</td></tr>';
         }
 
-        $new_donations_fmt  = number_format( $data['new_donations'], 2 );
+        $new_donations_fmt   = number_format( $data['new_donations'], 2 );
         $total_donations_fmt = number_format( $data['total_donations'], 2 );
+        $new_revenue_fmt     = number_format( $data['new_revenue'], 2 );
+        $total_revenue_fmt   = number_format( $data['total_revenue'], 2 );
 
         return "
         <html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -1597,7 +1612,7 @@ class MDCNA_CDT {
             </div>
 
             <div style='padding:24px' class='mdcna-report-wrap'>
-                <!-- KPI Summary — 2x2 grid that stacks on mobile -->
+                <!-- KPI Summary — 3x2 grid that stacks on mobile -->
                 <table style='width:100%;border-collapse:separate;border-spacing:8px;margin-bottom:24px'>
                     <tr class='mdcna-kpi-row'>
                         <td style='padding:16px;text-align:center;background:#f0fdf4;border-radius:8px;width:50%'>
@@ -1617,6 +1632,16 @@ class MDCNA_CDT {
                         <td style='padding:16px;text-align:center;background:#fdf2f8;border-radius:8px;width:50%'>
                             <div style='font-size:28px;font-weight:800;color:#e91e8c'>\${$total_donations_fmt}</div>
                             <div style='font-size:11px;color:#666;text-transform:uppercase;margin-top:4px'>Total Donations</div>
+                        </td>
+                    </tr>
+                    <tr class='mdcna-kpi-row'>
+                        <td style='padding:16px;text-align:center;background:#f0f9ff;border-radius:8px;width:50%'>
+                            <div style='font-size:28px;font-weight:800;color:#0891b2'>\${$new_revenue_fmt}</div>
+                            <div style='font-size:11px;color:#666;text-transform:uppercase;margin-top:4px'>New Revenue</div>
+                        </td>
+                        <td style='padding:16px;text-align:center;background:#faf5ff;border-radius:8px;width:50%'>
+                            <div style='font-size:28px;font-weight:800;color:#7c3aed'>\${$total_revenue_fmt}</div>
+                            <div style='font-size:11px;color:#666;text-transform:uppercase;margin-top:4px'>Total Revenue</div>
                         </td>
                     </tr>
                 </table>
