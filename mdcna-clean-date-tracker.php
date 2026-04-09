@@ -55,6 +55,12 @@ class MDCNA_CDT {
         add_action( 'wp_ajax_mdcna_delete_record',    [ $this, 'ajax_delete_record' ] );
         add_action( 'wp_ajax_mdcna_edit_clean_date',  [ $this, 'ajax_edit_clean_date' ] );
         add_action( 'wp_ajax_mdcna_bulk_delete',      [ $this, 'ajax_bulk_delete' ] );
+        add_action( 'wp_ajax_mdcna_save_email_settings',  [ $this, 'ajax_save_email_settings' ] );
+        add_action( 'wp_ajax_mdcna_send_test_email',      [ $this, 'ajax_send_test_email' ] );
+
+        // Email report cron hooks
+        add_action( 'mdcna_cdt_daily_report',  [ $this, 'send_daily_report' ] );
+        add_action( 'mdcna_cdt_weekly_report', [ $this, 'send_weekly_report' ] );
 
         // Fluent Forms submission hook
         add_action( 'fluentform/submission_inserted', [ $this, 'on_ff_submission' ], 10, 3 );
@@ -81,6 +87,8 @@ class MDCNA_CDT {
 
     public static function deactivate(): void {
         wp_clear_scheduled_hook( 'mdcna_cdt_daily' );
+        wp_clear_scheduled_hook( 'mdcna_cdt_daily_report' );
+        wp_clear_scheduled_hook( 'mdcna_cdt_weekly_report' );
         self::log( 'Plugin deactivated.' );
     }
 
@@ -513,22 +521,46 @@ class MDCNA_CDT {
 
         $rows  = $wpdb->get_col( "SELECT clean_date FROM {$table} WHERE status='active'" );
         $total = 0;
+        $total_hours = 0;
+        $now = new \DateTime( 'now' );
         foreach ( $rows as $d ) {
-            $total += self::days_since( $d );
+            try {
+                $start = new \DateTime( $d );
+                $diff  = $start->diff( $now );
+                $total += max( 0, (int) $diff->days );
+                $total_hours += max( 0, (int) $diff->days * 24 + (int) $diff->h );
+            } catch ( \Exception $e ) {
+                // skip invalid dates
+            }
         }
 
-        $years      = $total / 365;
-        $years_fmt  = number_format( $years, 1 );
-        $year_word  = $years >= 2 ? 'years' : 'year';
-        $count      = count( $rows );
+        $tt_years     = intdiv( $total, 365 );
+        $tt_rem_days  = $total % 365;
+        $tt_hours     = $total_hours % 24;
+        $count        = count( $rows );
 
         ob_start();
         ?>
         <div class="mdcna-total-time">
-            <div class="mdcna-tt-number" data-target="<?php echo $total; ?>">0</div>
-            <div class="mdcna-tt-label">Total Days Clean</div>
+            <div class="mdcna-tt-segments">
+                <div class="mdcna-tt-seg">
+                    <div class="mdcna-tt-number" data-target="<?php echo $tt_years; ?>">0</div>
+                    <div class="mdcna-tt-seg-label">Years</div>
+                </div>
+                <div class="mdcna-tt-sep">:</div>
+                <div class="mdcna-tt-seg">
+                    <div class="mdcna-tt-number" data-target="<?php echo $tt_rem_days; ?>">0</div>
+                    <div class="mdcna-tt-seg-label">Days</div>
+                </div>
+                <div class="mdcna-tt-sep">:</div>
+                <div class="mdcna-tt-seg">
+                    <div class="mdcna-tt-number" data-target="<?php echo $tt_hours; ?>">0</div>
+                    <div class="mdcna-tt-seg-label">Hours</div>
+                </div>
+            </div>
+            <div class="mdcna-tt-label">Total Clean Time</div>
             <div class="mdcna-tt-sub">
-                From NA Members who registered to the event
+                From NA Members who registered for the event
             </div>
         </div>
         <?php
@@ -579,6 +611,14 @@ class MDCNA_CDT {
             'manage_options',
             'mdcna-cdt-test',
             [ $this, 'admin_test_page' ]
+        );
+        add_submenu_page(
+            'mdcna-cdt',
+            'Email Reports',
+            'Email Reports',
+            'manage_options',
+            'mdcna-cdt-email-reports',
+            [ $this, 'admin_email_reports_page' ]
         );
     }
 
@@ -706,6 +746,7 @@ class MDCNA_CDT {
                         <th><?php echo $sl( 'donation', 'Donation' ); ?></th>
                         <th>Merch</th>
                         <th><?php echo $sl( 'created_at', 'Registered' ); ?></th>
+                        <th>Time</th>
                         <th style="width:80px">Actions</th>
                     </tr>
                 </thead>
@@ -750,6 +791,7 @@ class MDCNA_CDT {
                             <td><?php echo $row->donation > 0 ? '$' . number_format( $row->donation, 2 ) : '—'; ?></td>
                             <td><?php echo esc_html( $merch_str ); ?></td>
                             <td style="font-size:11px;color:#666"><?php echo esc_html( date( 'M j, Y', strtotime( $row->created_at ) ) ); ?></td>
+                            <td style="font-size:11px;color:#666"><?php echo esc_html( date( 'g:iA', strtotime( $row->created_at ) ) ); ?></td>
                             <td>
                                 <button class="button-link mdcna-delete-btn" data-id="<?php echo (int) $row->id; ?>"
                                         style="color:#b32d2e;font-size:12px" title="Delete record">Delete</button>
@@ -757,7 +799,7 @@ class MDCNA_CDT {
                         </tr>
                     <?php endforeach;
                 else : ?>
-                    <tr><td colspan="13">No registrations found.</td></tr>
+                    <tr><td colspan="14">No registrations found.</td></tr>
                 <?php endif; ?>
                 </tbody>
                 <?php if ( $rows ) : ?>
@@ -1402,6 +1444,425 @@ class MDCNA_CDT {
     }
 
     // ─────────────────────────────────────────────────────────
+    //  EMAIL REPORTS
+    // ─────────────────────────────────────────────────────────
+
+    private static function get_email_report_settings(): array {
+        return wp_parse_args( get_option( 'mdcna_cdt_email_reports', [] ), [
+            'recipients'     => '',
+            'from_email'     => 'support@namiamiconvention.org',
+            'daily_enabled'  => false,
+            'weekly_enabled' => false,
+        ] );
+    }
+
+    public function ajax_save_email_settings(): void {
+        if ( ! current_user_can( 'manage_options' ) || ! wp_verify_nonce( $_POST['nonce'] ?? '', 'mdcna_email_reports' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
+
+        $settings = [
+            'recipients'     => sanitize_textarea_field( $_POST['recipients'] ?? '' ),
+            'from_email'     => sanitize_email( $_POST['from_email'] ?? 'support@namiamiconvention.org' ),
+            'daily_enabled'  => ! empty( $_POST['daily_enabled'] ),
+            'weekly_enabled' => ! empty( $_POST['weekly_enabled'] ),
+        ];
+
+        update_option( 'mdcna_cdt_email_reports', $settings );
+
+        // Reschedule crons based on settings
+        wp_clear_scheduled_hook( 'mdcna_cdt_daily_report' );
+        wp_clear_scheduled_hook( 'mdcna_cdt_weekly_report' );
+
+        if ( $settings['daily_enabled'] && $settings['recipients'] ) {
+            wp_schedule_event( strtotime( 'tomorrow 8:00 AM' ), 'daily', 'mdcna_cdt_daily_report' );
+        }
+        if ( $settings['weekly_enabled'] && $settings['recipients'] ) {
+            wp_schedule_event( strtotime( 'next Monday 8:00 AM' ), 'weekly', 'mdcna_cdt_weekly_report' );
+        }
+
+        self::log( 'Email report settings saved. Daily=' . ( $settings['daily_enabled'] ? 'ON' : 'OFF' ) . ' Weekly=' . ( $settings['weekly_enabled'] ? 'ON' : 'OFF' ) );
+        wp_send_json_success( [ 'message' => 'Settings saved.' ] );
+    }
+
+    private static function get_report_recipients(): array {
+        $settings   = self::get_email_report_settings();
+        $raw        = $settings['recipients'];
+        $emails     = preg_split( '/[\s,;]+/', $raw, -1, PREG_SPLIT_NO_EMPTY );
+        return array_filter( array_map( 'sanitize_email', $emails ), 'is_email' );
+    }
+
+    private static function get_report_from_email(): string {
+        $settings = self::get_email_report_settings();
+        return $settings['from_email'] ?: 'support@namiamiconvention.org';
+    }
+
+    private static function report_email_headers(): array {
+        $from = self::get_report_from_email();
+        return [
+            'Content-Type: text/html; charset=UTF-8',
+            'From: MDCNA 2026 <' . $from . '>',
+        ];
+    }
+
+    private static function build_report_data( string $period = 'daily' ): array {
+        global $wpdb;
+        $table = $wpdb->prefix . MDCNA_CDT_TABLE;
+
+        $date_condition = ( $period === 'daily' )
+            ? $wpdb->prepare( "AND DATE(created_at) = %s", date( 'Y-m-d', strtotime( '-1 day' ) ) )
+            : $wpdb->prepare( "AND created_at >= %s", date( 'Y-m-d', strtotime( '-7 days' ) ) );
+
+        $period_label = ( $period === 'daily' ) ? 'Yesterday' : 'Last 7 Days';
+
+        // New registrations in period
+        $new_registrations = (int) $wpdb->get_var(
+            "SELECT COUNT(*) FROM {$table} WHERE status='active' {$date_condition}"
+        );
+
+        // Total registrations
+        $total_registrations = (int) $wpdb->get_var(
+            "SELECT COUNT(*) FROM {$table} WHERE status='active'"
+        );
+
+        // New donations in period
+        $new_donations = (float) $wpdb->get_var(
+            "SELECT COALESCE(SUM(donation), 0) FROM {$table} WHERE status='active' AND donation > 0 {$date_condition}"
+        );
+
+        // Total donations
+        $total_donations = (float) $wpdb->get_var(
+            "SELECT COALESCE(SUM(donation), 0) FROM {$table} WHERE status='active' AND donation > 0"
+        );
+
+        // New registrants list
+        $new_rows = $wpdb->get_results(
+            "SELECT first_name, last_name, email, clean_date, qty, donation, created_at
+             FROM {$table} WHERE status='active' {$date_condition} ORDER BY created_at DESC LIMIT 50"
+        );
+
+        return [
+            'period_label'        => $period_label,
+            'period'              => $period,
+            'new_registrations'   => $new_registrations,
+            'total_registrations' => $total_registrations,
+            'new_donations'       => $new_donations,
+            'total_donations'     => $total_donations,
+            'new_rows'            => $new_rows,
+        ];
+    }
+
+    private static function build_report_html( array $data ): string {
+        $period_label = $data['period_label'];
+        $period_title = ( $data['period'] === 'daily' ) ? 'Daily Report' : 'Weekly Report';
+
+        // Build new registrants table rows
+        $registrant_rows = '';
+        if ( ! empty( $data['new_rows'] ) ) {
+            foreach ( $data['new_rows'] as $row ) {
+                $registrant_rows .= sprintf(
+                    '<tr><td style="padding:6px 10px;border-bottom:1px solid #eee">%s %s</td><td style="padding:6px 10px;border-bottom:1px solid #eee" class="mdcna-hide-mobile">%s</td><td style="padding:6px 10px;border-bottom:1px solid #eee">%s</td><td style="padding:6px 10px;border-bottom:1px solid #eee">%s</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right">$%s</td></tr>',
+                    esc_html( $row->first_name ),
+                    esc_html( $row->last_name ),
+                    esc_html( $row->email ),
+                    esc_html( date( 'M j, Y', strtotime( $row->clean_date ) ) ),
+                    esc_html( self::format_clean_time( self::days_since( $row->clean_date ) ) ),
+                    number_format( (float) $row->donation, 2 )
+                );
+            }
+        } else {
+            $registrant_rows = '<tr><td colspan="5" style="padding:12px;text-align:center;color:#999">No new registrations for this period.</td></tr>';
+        }
+
+        $new_donations_fmt  = number_format( $data['new_donations'], 2 );
+        $total_donations_fmt = number_format( $data['total_donations'], 2 );
+
+        return "
+        <html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+        <style>
+            @media only screen and (max-width:600px) {
+                .mdcna-kpi-row td { display:block !important; width:100% !important; margin-bottom:8px !important; }
+                .mdcna-kpi-spacer { display:none !important; }
+                .mdcna-report-wrap { padding:12px !important; }
+                .mdcna-report-wrap h1 { font-size:18px !important; }
+                .mdcna-reg-table { font-size:11px !important; }
+                .mdcna-reg-table th, .mdcna-reg-table td { padding:6px 4px !important; }
+                .mdcna-hide-mobile { display:none !important; }
+            }
+        </style></head><body style='margin:0;padding:0'>
+        <div style='font-family:Arial,sans-serif;max-width:700px;margin:0 auto'>
+            <div style='background:linear-gradient(135deg,#e91e8c,#00bcd4);padding:24px;text-align:center' class='mdcna-report-wrap'>
+                <h1 style='color:#fff;margin:0;font-size:22px'>MDCNA 2026 — {$period_title}</h1>
+                <p style='color:rgba(255,255,255,0.85);margin:6px 0 0;font-size:13px'>{$period_label} · Generated " . date( 'M j, Y g:i A' ) . "</p>
+            </div>
+
+            <div style='padding:24px' class='mdcna-report-wrap'>
+                <!-- KPI Summary — 2x2 grid that stacks on mobile -->
+                <table style='width:100%;border-collapse:separate;border-spacing:8px;margin-bottom:24px'>
+                    <tr class='mdcna-kpi-row'>
+                        <td style='padding:16px;text-align:center;background:#f0fdf4;border-radius:8px;width:50%'>
+                            <div style='font-size:28px;font-weight:800;color:#16a34a'>{$data['new_registrations']}</div>
+                            <div style='font-size:11px;color:#666;text-transform:uppercase;margin-top:4px'>New Registrations</div>
+                        </td>
+                        <td style='padding:16px;text-align:center;background:#eff6ff;border-radius:8px;width:50%'>
+                            <div style='font-size:28px;font-weight:800;color:#2563eb'>{$data['total_registrations']}</div>
+                            <div style='font-size:11px;color:#666;text-transform:uppercase;margin-top:4px'>Total Registrations</div>
+                        </td>
+                    </tr>
+                    <tr class='mdcna-kpi-row'>
+                        <td style='padding:16px;text-align:center;background:#fefce8;border-radius:8px;width:50%'>
+                            <div style='font-size:28px;font-weight:800;color:#ca8a04'>\${$new_donations_fmt}</div>
+                            <div style='font-size:11px;color:#666;text-transform:uppercase;margin-top:4px'>New Donations</div>
+                        </td>
+                        <td style='padding:16px;text-align:center;background:#fdf2f8;border-radius:8px;width:50%'>
+                            <div style='font-size:28px;font-weight:800;color:#e91e8c'>\${$total_donations_fmt}</div>
+                            <div style='font-size:11px;color:#666;text-transform:uppercase;margin-top:4px'>Total Donations</div>
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- New Registrants -->
+                <h3 style='font-size:14px;font-weight:600;color:#333;margin:0 0 10px'>New Registrations ({$period_label})</h3>
+                <div style='overflow-x:auto;-webkit-overflow-scrolling:touch'>
+                    <table class='mdcna-reg-table' style='width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;min-width:480px'>
+                        <thead>
+                            <tr style='background:#1e1e2e;color:#fff'>
+                                <th style='padding:8px 10px;text-align:left;font-size:12px'>Name</th>
+                                <th style='padding:8px 10px;text-align:left;font-size:12px' class='mdcna-hide-mobile'>Email</th>
+                                <th style='padding:8px 10px;text-align:left;font-size:12px'>Clean Date</th>
+                                <th style='padding:8px 10px;text-align:left;font-size:12px'>Time Clean</th>
+                                <th style='padding:8px 10px;text-align:right;font-size:12px'>Donation</th>
+                            </tr>
+                        </thead>
+                        <tbody>{$registrant_rows}</tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div style='background:#222;padding:12px;text-align:center'>
+                <p style='color:#aaa;font-size:12px;margin:0'>MDCNA 2026 · Miami Beach · August 7–9, 2026</p>
+            </div>
+        </div>
+        </body></html>";
+    }
+
+    private function send_report( string $period ): bool {
+        $recipients = self::get_report_recipients();
+        if ( empty( $recipients ) ) {
+            self::log( "Email report ({$period}): No recipients configured, skipping." );
+            return false;
+        }
+
+        $data    = self::build_report_data( $period );
+        $html    = self::build_report_html( $data );
+        $subject = ( $period === 'daily' )
+            ? '[MDCNA 2026] Daily Report — ' . date( 'M j, Y' )
+            : '[MDCNA 2026] Weekly Report — Week of ' . date( 'M j, Y', strtotime( '-7 days' ) );
+
+        $sent = wp_mail( $recipients, $subject, $html, self::report_email_headers() );
+        self::log( "Email report ({$period}) sent to " . implode( ', ', $recipients ) . " — " . ( $sent ? 'OK' : 'FAILED' ) );
+        return $sent;
+    }
+
+    public function send_daily_report(): void {
+        $settings = self::get_email_report_settings();
+        if ( $settings['daily_enabled'] ) {
+            $this->send_report( 'daily' );
+        }
+    }
+
+    public function send_weekly_report(): void {
+        $settings = self::get_email_report_settings();
+        if ( $settings['weekly_enabled'] ) {
+            $this->send_report( 'weekly' );
+        }
+    }
+
+    public function ajax_send_test_email(): void {
+        if ( ! current_user_can( 'manage_options' ) || ! wp_verify_nonce( $_POST['nonce'] ?? '', 'mdcna_email_reports' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
+
+        $type       = sanitize_text_field( $_POST['report_type'] ?? 'daily' );
+        $recipients = self::get_report_recipients();
+
+        if ( empty( $recipients ) ) {
+            wp_send_json_error( 'No valid recipient emails configured. Please save settings first.' );
+        }
+
+        $data    = self::build_report_data( $type );
+        $html    = self::build_report_html( $data );
+        $subject = '[MDCNA 2026] TEST ' . ucfirst( $type ) . ' Report — ' . date( 'M j, Y g:i A' );
+
+        $sent = wp_mail( $recipients, $subject, $html, self::report_email_headers() );
+
+        if ( $sent ) {
+            self::log( "Test {$type} report sent to: " . implode( ', ', $recipients ) );
+            wp_send_json_success( [ 'message' => 'Test email sent to: ' . implode( ', ', $recipients ) ] );
+        } else {
+            self::log( "Test {$type} report FAILED to send.", 'error' );
+            wp_send_json_error( 'Failed to send email. Check your WordPress mail configuration.' );
+        }
+    }
+
+    public function admin_email_reports_page(): void {
+        $settings = self::get_email_report_settings();
+        $nonce    = wp_create_nonce( 'mdcna_email_reports' );
+
+        // Next scheduled times
+        $next_daily  = wp_next_scheduled( 'mdcna_cdt_daily_report' );
+        $next_weekly = wp_next_scheduled( 'mdcna_cdt_weekly_report' );
+        ?>
+        <style>
+            #mdcna-email-wrap .mdcna-email-grid { display:flex; gap:20px; flex-wrap:wrap; }
+            #mdcna-email-wrap .mdcna-card { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:24px; box-shadow:0 1px 4px rgba(0,0,0,.06); }
+            #mdcna-email-wrap .mdcna-card-settings { flex:1; min-width:300px; }
+            #mdcna-email-wrap .mdcna-card-test { min-width:260px; max-width:360px; align-self:flex-start; }
+            #mdcna-email-wrap .form-table th { padding:12px 10px 12px 0; width:160px; }
+            #mdcna-email-wrap .form-table td { padding:12px 0; }
+            #mdcna-email-wrap input.regular-text,
+            #mdcna-email-wrap textarea.large-text { max-width:100%; box-sizing:border-box; }
+            @media screen and (max-width:782px) {
+                #mdcna-email-wrap .mdcna-email-grid { flex-direction:column; }
+                #mdcna-email-wrap .mdcna-card-settings { min-width:0; }
+                #mdcna-email-wrap .mdcna-card-test { max-width:none; }
+                #mdcna-email-wrap .form-table,
+                #mdcna-email-wrap .form-table tbody,
+                #mdcna-email-wrap .form-table tr,
+                #mdcna-email-wrap .form-table th,
+                #mdcna-email-wrap .form-table td { display:block; width:100%; }
+                #mdcna-email-wrap .form-table th { padding-bottom:4px; }
+                #mdcna-email-wrap .form-table td { padding-top:0; }
+            }
+        </style>
+        <div class="wrap" id="mdcna-email-wrap">
+            <h1>MDCNA 2026 — Email Reports</h1>
+            <p style="color:#666;font-size:13px;margin:-8px 0 20px">Configure automated daily and weekly email reports for registration and donation activity.</p>
+
+            <div class="mdcna-email-grid">
+                <!-- Settings Card -->
+                <div class="mdcna-card mdcna-card-settings">
+                    <h2 style="margin:0 0 16px;font-size:16px;font-weight:600">Report Settings</h2>
+
+                    <table class="form-table" style="margin:0">
+                        <tr>
+                            <th><label for="mdcna-from-email">From Email</label></th>
+                            <td>
+                                <input type="email" id="mdcna-from-email" class="regular-text" value="<?php echo esc_attr( $settings['from_email'] ); ?>" placeholder="support@namiamiconvention.org">
+                                <p class="description">The sender email address for report emails.</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label for="mdcna-recipients">Recipient Emails</label></th>
+                            <td>
+                                <textarea id="mdcna-recipients" class="large-text" rows="4" placeholder="email1@example.com&#10;email2@example.com"><?php echo esc_textarea( $settings['recipients'] ); ?></textarea>
+                                <p class="description">One email per line, or separated by commas. These addresses will receive the reports.</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>Report Frequency</th>
+                            <td>
+                                <label style="display:block;margin-bottom:10px">
+                                    <input type="checkbox" id="mdcna-daily-enabled" <?php checked( $settings['daily_enabled'] ); ?>>
+                                    <strong>Daily Report</strong> — sent every morning at 8:00 AM
+                                    <?php if ( $next_daily ) : ?>
+                                        <br><span style="color:#16a34a;font-size:12px;margin-left:24px">Next: <?php echo date( 'M j, Y g:i A', $next_daily ); ?></span>
+                                    <?php endif; ?>
+                                </label>
+                                <label style="display:block">
+                                    <input type="checkbox" id="mdcna-weekly-enabled" <?php checked( $settings['weekly_enabled'] ); ?>>
+                                    <strong>Weekly Report</strong> — sent every Monday at 8:00 AM
+                                    <?php if ( $next_weekly ) : ?>
+                                        <br><span style="color:#16a34a;font-size:12px;margin-left:24px">Next: <?php echo date( 'M j, Y g:i A', $next_weekly ); ?></span>
+                                    <?php endif; ?>
+                                </label>
+                            </td>
+                        </tr>
+                    </table>
+
+                    <div style="margin-top:16px;padding-top:16px;border-top:1px solid #eee">
+                        <button id="mdcna-save-settings" class="button button-primary">Save Settings</button>
+                        <span id="mdcna-save-status" style="margin-left:12px;font-style:italic;color:#666"></span>
+                    </div>
+                </div>
+
+                <!-- Test Email Card -->
+                <div class="mdcna-card mdcna-card-test">
+                    <h2 style="margin:0 0 16px;font-size:16px;font-weight:600">Send Test Email</h2>
+                    <p style="color:#555;font-size:13px;margin-bottom:16px">Send a test report to all configured recipients to verify email delivery is working.</p>
+
+                    <label style="display:block;margin-bottom:12px">
+                        <strong>Report Type:</strong><br>
+                        <select id="mdcna-test-type" style="margin-top:4px;min-width:200px">
+                            <option value="daily">Daily Report</option>
+                            <option value="weekly">Weekly Report</option>
+                        </select>
+                    </label>
+
+                    <button id="mdcna-send-test" class="button button-secondary" style="background:#e91e8c;color:#fff;border-color:#d4187f">
+                        Send Test Email
+                    </button>
+                    <div id="mdcna-test-status" style="margin-top:10px;font-size:13px"></div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+        (function($){
+            const nonce = '<?php echo $nonce; ?>';
+
+            $('#mdcna-save-settings').on('click', function(){
+                const btn = $(this);
+                btn.prop('disabled', true);
+                $('#mdcna-save-status').css('color','#666').text('Saving…');
+
+                $.post(ajaxurl, {
+                    action: 'mdcna_save_email_settings',
+                    nonce: nonce,
+                    recipients: $('#mdcna-recipients').val(),
+                    from_email: $('#mdcna-from-email').val(),
+                    daily_enabled: $('#mdcna-daily-enabled').is(':checked') ? 1 : 0,
+                    weekly_enabled: $('#mdcna-weekly-enabled').is(':checked') ? 1 : 0
+                }, function(res){
+                    if(res.success){
+                        $('#mdcna-save-status').css('color','#16a34a').text('✓ ' + res.data.message);
+                    } else {
+                        $('#mdcna-save-status').css('color','red').text('Error: ' + res.data);
+                    }
+                    btn.prop('disabled', false);
+                }).fail(function(){
+                    $('#mdcna-save-status').css('color','red').text('Request failed.');
+                    btn.prop('disabled', false);
+                });
+            });
+
+            $('#mdcna-send-test').on('click', function(){
+                const btn = $(this);
+                btn.prop('disabled', true);
+                $('#mdcna-test-status').css('color','#666').html('Sending test email…');
+
+                $.post(ajaxurl, {
+                    action: 'mdcna_send_test_email',
+                    nonce: nonce,
+                    report_type: $('#mdcna-test-type').val()
+                }, function(res){
+                    if(res.success){
+                        $('#mdcna-test-status').css('color','#16a34a').html('✓ ' + res.data.message);
+                    } else {
+                        $('#mdcna-test-status').css('color','red').html('✗ ' + res.data);
+                    }
+                    btn.prop('disabled', false);
+                }).fail(function(){
+                    $('#mdcna-test-status').css('color','red').html('Request failed.');
+                    btn.prop('disabled', false);
+                });
+            });
+        })(jQuery);
+        </script>
+        <?php
+    }
+
+    // ─────────────────────────────────────────────────────────
     //  STYLES
     // ─────────────────────────────────────────────────────────
     private static function admin_css(): string {
@@ -1462,6 +1923,14 @@ class MDCNA_CDT {
         .mdcna-total-time,
         .mdcna-leaderboard {
             font-family: 'Segoe UI', Arial, sans-serif;
+            box-sizing: border-box;
+            max-width: 100%;
+            overflow: hidden;
+        }
+        .mdcna-clean-time-card *,
+        .mdcna-total-time *,
+        .mdcna-leaderboard * {
+            box-sizing: border-box;
         }
 
         /* ── Personal Clean Time Card ── */
@@ -1502,6 +1971,35 @@ class MDCNA_CDT {
         .mdcna-total-time {
             text-align: center;
             padding: 40px 32px;
+        }
+        .mdcna-tt-segments {
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            gap: 8px;
+        }
+        .mdcna-tt-seg {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .mdcna-tt-seg-label {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: .15em;
+            color: rgba(255, 255, 255, 0.7);
+            margin-top: 6px;
+            font-weight: 600;
+        }
+        .mdcna-tt-sep {
+            font-size: 60px;
+            font-weight: 900;
+            line-height: 1;
+            background: linear-gradient(180deg, #ffffff 30%, #a8e8ff 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            padding: 0 4px;
         }
         .mdcna-tt-number {
             font-size: 80px;
@@ -1572,6 +2070,66 @@ class MDCNA_CDT {
             border: 1px solid rgba(255,45,155,0.15); text-align: center;
         }
         .mdcna-login-msg a, .mdcna-no-record a { color: #ff2d9b; }
+
+        /* ── Responsive — Tablet ── */
+        @media (max-width: 768px) {
+            /* Total Time */
+            .mdcna-tt-number { font-size: 52px; letter-spacing: -1px; }
+            .mdcna-tt-sep { font-size: 40px; }
+            .mdcna-tt-seg-label { font-size: 12px; }
+            .mdcna-total-time { padding: 28px 16px; }
+
+            /* Clean Time Card */
+            .mdcna-cdc-inner { padding: 24px 28px; }
+            .mdcna-cdc-days { font-size: 54px; }
+            .mdcna-cdc-label { font-size: 15px; }
+
+            /* Leaderboard */
+            .mdcna-leaderboard { padding: 16px; }
+            .mdcna-lb-item {
+                grid-template-columns: 28px 1fr auto;
+                gap: 8px; padding: 8px 10px;
+            }
+            .mdcna-lb-time { display: none; }
+            .mdcna-lb-name { font-size: 13px; }
+            .mdcna-lb-days { font-size: 11px; }
+        }
+
+        /* ── Responsive — Small phones ── */
+        @media (max-width: 480px) {
+            /* Total Time */
+            .mdcna-tt-number { font-size: 36px; letter-spacing: 0; }
+            .mdcna-tt-sep { font-size: 28px; padding: 0 2px; }
+            .mdcna-tt-segments { gap: 4px; }
+            .mdcna-tt-seg-label { font-size: 10px; letter-spacing: .08em; }
+            .mdcna-tt-label { font-size: 12px; letter-spacing: .15em; }
+            .mdcna-tt-sub { font-size: 13px; }
+            .mdcna-total-time { padding: 20px 12px; }
+
+            /* Clean Time Card */
+            .mdcna-clean-time-card { display: block; }
+            .mdcna-cdc-inner { padding: 20px 16px; }
+            .mdcna-cdc-icon { font-size: 28px; }
+            .mdcna-cdc-days { font-size: 42px; }
+            .mdcna-cdc-label { font-size: 14px; }
+            .mdcna-cdc-name { font-size: 10px; letter-spacing: .12em; }
+            .mdcna-cdc-date { font-size: 11px; }
+
+            /* Leaderboard */
+            .mdcna-leaderboard { padding: 12px; border-radius: 12px; }
+            .mdcna-lb-title { font-size: 13px; letter-spacing: .08em; }
+            .mdcna-lb-item {
+                grid-template-columns: 24px 1fr auto;
+                gap: 6px; padding: 7px 8px;
+                border-radius: 8px;
+            }
+            .mdcna-lb-name { font-size: 12px; }
+            .mdcna-lb-days { font-size: 10px; }
+            .mdcna-lb-rank { font-size: 9px; }
+
+            /* Messages */
+            .mdcna-login-msg, .mdcna-no-record { font-size: 13px; padding: 10px; }
+        }
         ";
     }
 
@@ -1636,21 +2194,14 @@ document.addEventListener('DOMContentLoaded', function() {
         elements.forEach(function(el) { observer.observe(el); });
     }
 
-    // ── Total Time Counter ────────────────────────────────────
-    observeAndAnimate('.mdcna-tt-number[data-target]', function(el) {
-        var target   = parseInt(el.getAttribute('data-target'), 10) || 0;
-        var duration = Math.min(2500, Math.max(800, target * 0.3));
-        countUp(el, target, duration);
-
-        var sub   = el.closest('.mdcna-total-time').querySelector('.mdcna-tt-sub-live');
-        var years = parseFloat(sub ? sub.getAttribute('data-years') : 0) || 0;
-        var count = parseInt(sub ? sub.getAttribute('data-count') : 0, 10) || 0;
-        if (sub && target > 0) {
-            setTimeout(function() {
-                var yearWord = years >= 2 ? 'years' : 'year';
-                sub.textContent = years.toFixed(1) + ' combined ' + yearWord + ' across ' + count.toLocaleString('en-US') + ' registered attendees';
-            }, duration * 0.8);
-        }
+    // ── Total Time Counter (Years : Days : Hours) ──────────────
+    observeAndAnimate('.mdcna-total-time', function(container) {
+        var nums = container.querySelectorAll('.mdcna-tt-number[data-target]');
+        nums.forEach(function(el) {
+            var target   = parseInt(el.getAttribute('data-target'), 10) || 0;
+            var duration = Math.min(2500, Math.max(800, target * 0.5));
+            countUp(el, target, duration);
+        });
     });
 
     // ── Personal Clean Time Card ──────────────────────────────
