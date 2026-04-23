@@ -1401,7 +1401,7 @@ class MDCNA_CDT {
         header( 'Pragma: no-cache' );
 
         $out = fopen( 'php://output', 'w' );
-        fputcsv( $out, [ 'ID', 'First', 'Last', 'Email', 'Phone', 'Clean Date', 'Days Clean', 'Time Clean', 'Qty', 'Donation', 'Merch', 'IP', 'Registered At' ] );
+        fputcsv( $out, [ 'ID', 'First', 'Last', 'Email', 'Phone', 'Clean Date', 'Days Clean', 'Time Clean', 'Qty', 'Donation', 'Registered At' ] );
 
         foreach ( $rows as $row ) {
             $days  = self::days_since( $row['clean_date'] );
@@ -1416,8 +1416,6 @@ class MDCNA_CDT {
                 self::format_clean_time( $days ),
                 $row['qty'],
                 $row['donation'],
-                $row['merch_json'],
-                $row['ip_address'],
                 $row['created_at'],
             ] );
         }
@@ -1733,21 +1731,12 @@ class MDCNA_CDT {
         $fp = fopen( $path, 'w' );
         if ( ! $fp ) return '';
 
-        fputcsv( $fp, [ '#', 'First Name', 'Last Name', 'Email', 'Phone', 'Clean Date', 'Time Clean', 'Qty', 'Donation', 'Merch', 'Registered At' ] );
+        fputcsv( $fp, [ '#', 'First Name', 'Last Name', 'Email', 'Phone', 'Clean Date', 'Time Clean', 'Qty', 'Donation', 'Registered At' ] );
 
         $i = 0;
         foreach ( $rows as $row ) {
             $i++;
             $days = self::days_since( $row->clean_date );
-            $merch_items = [];
-            $merch = json_decode( $row->merch_json ?? '', true );
-            if ( is_array( $merch ) ) {
-                foreach ( $merch as $key => $info ) {
-                    $qty = is_array( $info ) ? ( $info['qty'] ?? 1 ) : 1;
-                    $size = ( is_array( $info ) && ! empty( $info['size'] ) ) ? " ({$info['size']})" : '';
-                    $merch_items[] = self::merch_label( $key ) . ' x' . $qty . $size;
-                }
-            }
             fputcsv( $fp, [
                 $i,
                 $row->first_name,
@@ -1758,7 +1747,6 @@ class MDCNA_CDT {
                 self::format_clean_time( $days ),
                 (int) $row->qty,
                 number_format( (float) $row->donation, 2 ),
-                implode( ', ', $merch_items ),
                 $row->created_at,
             ] );
         }
