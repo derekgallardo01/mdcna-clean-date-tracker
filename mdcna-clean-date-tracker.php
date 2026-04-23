@@ -1552,6 +1552,12 @@ class MDCNA_CDT {
              FROM {$table} WHERE status='active' {$date_condition} ORDER BY created_at DESC LIMIT 50"
         );
 
+        // Full attendee roster (all active registrants) — for check-in/badges
+        $all_rows = $wpdb->get_results(
+            "SELECT first_name, last_name, email, phone, clean_date, qty, donation, merch_json, created_at
+             FROM {$table} WHERE status='active' ORDER BY last_name ASC, first_name ASC"
+        );
+
         return [
             'period_label'        => $period_label,
             'period'              => $period,
@@ -1562,6 +1568,7 @@ class MDCNA_CDT {
             'new_revenue'         => $new_revenue,
             'total_revenue'       => $total_revenue_all,
             'new_rows'            => $new_rows,
+            'all_rows'            => $all_rows,
         ];
     }
 
@@ -1591,6 +1598,28 @@ class MDCNA_CDT {
         $total_donations_fmt = number_format( $data['total_donations'], 2 );
         $new_revenue_fmt     = number_format( $data['new_revenue'], 2 );
         $total_revenue_fmt   = number_format( $data['total_revenue'], 2 );
+
+        // Build full attendee roster rows (sorted by last name)
+        $roster_rows = '';
+        $roster_count = 0;
+        if ( ! empty( $data['all_rows'] ) ) {
+            foreach ( $data['all_rows'] as $i => $row ) {
+                $roster_count++;
+                $zebra = $i % 2 === 0 ? '#ffffff' : '#f9fafb';
+                $roster_rows .= sprintf(
+                    '<tr style="background:%s"><td style="padding:6px 10px;border-bottom:1px solid #eee;font-size:12px">%d</td><td style="padding:6px 10px;border-bottom:1px solid #eee;font-size:12px">%s %s</td><td style="padding:6px 10px;border-bottom:1px solid #eee;font-size:12px" class="mdcna-hide-mobile">%s</td><td style="padding:6px 10px;border-bottom:1px solid #eee;font-size:12px">%s</td><td style="padding:6px 10px;border-bottom:1px solid #eee;font-size:12px;text-align:center">%d</td></tr>',
+                    $zebra,
+                    $roster_count,
+                    esc_html( $row->first_name ),
+                    esc_html( $row->last_name ),
+                    esc_html( $row->email ),
+                    esc_html( date( 'M j, Y', strtotime( $row->clean_date ) ) ),
+                    (int) $row->qty
+                );
+            }
+        } else {
+            $roster_rows = '<tr><td colspan="5" style="padding:12px;text-align:center;color:#999">No registered attendees yet.</td></tr>';
+        }
 
         return "
         <html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -1662,6 +1691,24 @@ class MDCNA_CDT {
                         <tbody>{$registrant_rows}</tbody>
                     </table>
                 </div>
+
+                <!-- Full Attendee Roster (for check-in / badges / welcome bags) -->
+                <h3 style='font-size:14px;font-weight:600;color:#333;margin:28px 0 4px'>Full Attendee Roster ({$data['total_registrations']} total)</h3>
+                <p style='font-size:12px;color:#666;margin:0 0 10px'>Complete list of all registered attendees, sorted by last name. A CSV copy is attached to this email for printing badges and check-in lists.</p>
+                <div style='overflow-x:auto;-webkit-overflow-scrolling:touch'>
+                    <table class='mdcna-reg-table' style='width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;min-width:480px'>
+                        <thead>
+                            <tr style='background:#1e1e2e;color:#fff'>
+                                <th style='padding:8px 10px;text-align:left;font-size:12px;width:40px'>#</th>
+                                <th style='padding:8px 10px;text-align:left;font-size:12px'>Name</th>
+                                <th style='padding:8px 10px;text-align:left;font-size:12px' class='mdcna-hide-mobile'>Email</th>
+                                <th style='padding:8px 10px;text-align:left;font-size:12px'>Clean Date</th>
+                                <th style='padding:8px 10px;text-align:center;font-size:12px'>Qty</th>
+                            </tr>
+                        </thead>
+                        <tbody>{$roster_rows}</tbody>
+                    </table>
+                </div>
             </div>
 
             <div style='background:#222;padding:12px;text-align:center'>
@@ -1669,6 +1716,54 @@ class MDCNA_CDT {
             </div>
         </div>
         </body></html>";
+    }
+
+    /**
+     * Build a CSV file of the full attendee roster. Returns the absolute file path.
+     * Caller is responsible for deleting the file after wp_mail() runs.
+     */
+    private static function build_attendee_csv( array $rows ): string {
+        $upload  = wp_upload_dir();
+        $dir     = trailingslashit( $upload['basedir'] ) . 'mdcna-reports';
+        if ( ! file_exists( $dir ) ) {
+            wp_mkdir_p( $dir );
+        }
+        $path = $dir . '/mdcna-attendees-' . date( 'Y-m-d-His' ) . '.csv';
+
+        $fp = fopen( $path, 'w' );
+        if ( ! $fp ) return '';
+
+        fputcsv( $fp, [ '#', 'First Name', 'Last Name', 'Email', 'Phone', 'Clean Date', 'Time Clean', 'Qty', 'Donation', 'Merch', 'Registered At' ] );
+
+        $i = 0;
+        foreach ( $rows as $row ) {
+            $i++;
+            $days = self::days_since( $row->clean_date );
+            $merch_items = [];
+            $merch = json_decode( $row->merch_json ?? '', true );
+            if ( is_array( $merch ) ) {
+                foreach ( $merch as $key => $info ) {
+                    $qty = is_array( $info ) ? ( $info['qty'] ?? 1 ) : 1;
+                    $size = ( is_array( $info ) && ! empty( $info['size'] ) ) ? " ({$info['size']})" : '';
+                    $merch_items[] = self::merch_label( $key ) . ' x' . $qty . $size;
+                }
+            }
+            fputcsv( $fp, [
+                $i,
+                $row->first_name,
+                $row->last_name,
+                $row->email,
+                $row->phone ?? '',
+                $row->clean_date,
+                self::format_clean_time( $days ),
+                (int) $row->qty,
+                number_format( (float) $row->donation, 2 ),
+                implode( ', ', $merch_items ),
+                $row->created_at,
+            ] );
+        }
+        fclose( $fp );
+        return $path;
     }
 
     private function send_report( string $period ): bool {
@@ -1684,7 +1779,15 @@ class MDCNA_CDT {
             ? '[MDCNA 2026] Daily Report — ' . date( 'M j, Y' )
             : '[MDCNA 2026] Weekly Report — Week of ' . date( 'M j, Y', strtotime( '-7 days' ) );
 
-        $sent = wp_mail( $recipients, $subject, $html, self::report_email_headers() );
+        $csv_path    = self::build_attendee_csv( $data['all_rows'] );
+        $attachments = $csv_path ? [ $csv_path ] : [];
+
+        $sent = wp_mail( $recipients, $subject, $html, self::report_email_headers(), $attachments );
+
+        if ( $csv_path && file_exists( $csv_path ) ) {
+            @unlink( $csv_path );
+        }
+
         self::log( "Email report ({$period}) sent to " . implode( ', ', $recipients ) . " — " . ( $sent ? 'OK' : 'FAILED' ) );
         return $sent;
     }
@@ -1719,7 +1822,14 @@ class MDCNA_CDT {
         $html    = self::build_report_html( $data );
         $subject = '[MDCNA 2026] TEST ' . ucfirst( $type ) . ' Report — ' . date( 'M j, Y g:i A' );
 
-        $sent = wp_mail( $recipients, $subject, $html, self::report_email_headers() );
+        $csv_path    = self::build_attendee_csv( $data['all_rows'] );
+        $attachments = $csv_path ? [ $csv_path ] : [];
+
+        $sent = wp_mail( $recipients, $subject, $html, self::report_email_headers(), $attachments );
+
+        if ( $csv_path && file_exists( $csv_path ) ) {
+            @unlink( $csv_path );
+        }
 
         if ( $sent ) {
             self::log( "Test {$type} report sent to: " . implode( ', ', $recipients ) );
@@ -1811,23 +1921,37 @@ class MDCNA_CDT {
                     </div>
                 </div>
 
-                <!-- Test Email Card -->
-                <div class="mdcna-card mdcna-card-test">
-                    <h2 style="margin:0 0 16px;font-size:16px;font-weight:600">Send Test Email</h2>
-                    <p style="color:#555;font-size:13px;margin-bottom:16px">Send a test report to all configured recipients to verify email delivery is working.</p>
+                <!-- Action Cards Column -->
+                <div class="mdcna-card mdcna-card-test" style="display:flex;flex-direction:column;gap:20px;padding:0;background:transparent;border:none;box-shadow:none">
 
-                    <label style="display:block;margin-bottom:12px">
-                        <strong>Report Type:</strong><br>
-                        <select id="mdcna-test-type" style="margin-top:4px;min-width:200px">
-                            <option value="daily">Daily Report</option>
-                            <option value="weekly">Weekly Report</option>
-                        </select>
-                    </label>
+                    <!-- Download CSV Card -->
+                    <div style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.06)">
+                        <h2 style="margin:0 0 16px;font-size:16px;font-weight:600">Download Attendee CSV</h2>
+                        <p style="color:#555;font-size:13px;margin-bottom:16px">Download the complete roster of all registered attendees — useful for printing badges, welcome bags, and check-in lists.</p>
+                        <a href="<?php echo esc_url( admin_url( 'admin-ajax.php?action=mdcna_export_csv&nonce=' . wp_create_nonce( 'mdcna_export' ) ) ); ?>"
+                           class="button button-primary" style="background:#0891b2;border-color:#0e7490;text-decoration:none">
+                            ⬇ Download CSV
+                        </a>
+                    </div>
 
-                    <button id="mdcna-send-test" class="button button-secondary" style="background:#e91e8c;color:#fff;border-color:#d4187f">
-                        Send Test Email
-                    </button>
-                    <div id="mdcna-test-status" style="margin-top:10px;font-size:13px"></div>
+                    <!-- Test Email Card -->
+                    <div style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.06)">
+                        <h2 style="margin:0 0 16px;font-size:16px;font-weight:600">Send Test Email</h2>
+                        <p style="color:#555;font-size:13px;margin-bottom:16px">Send a test report to all configured recipients to verify email delivery is working.</p>
+
+                        <label style="display:block;margin-bottom:12px">
+                            <strong>Report Type:</strong><br>
+                            <select id="mdcna-test-type" style="margin-top:4px;min-width:200px">
+                                <option value="daily">Daily Report</option>
+                                <option value="weekly">Weekly Report</option>
+                            </select>
+                        </label>
+
+                        <button id="mdcna-send-test" class="button button-secondary" style="background:#e91e8c;color:#fff;border-color:#d4187f">
+                            Send Test Email
+                        </button>
+                        <div id="mdcna-test-status" style="margin-top:10px;font-size:13px"></div>
+                    </div>
                 </div>
             </div>
         </div>
