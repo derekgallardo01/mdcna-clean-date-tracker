@@ -52,6 +52,7 @@ class MDCNA_CDT {
         add_action( 'wp_ajax_mdcna_export_csv',       [ $this, 'ajax_export_csv' ] );
         add_action( 'wp_ajax_mdcna_insert_test_data', [ $this, 'ajax_insert_test_data' ] );
         add_action( 'wp_ajax_mdcna_delete_test_data', [ $this, 'ajax_delete_test_data' ] );
+        add_action( 'wp_ajax_mdcna_insert_manual',    [ $this, 'ajax_insert_manual_record' ] );
         add_action( 'wp_ajax_mdcna_delete_record',    [ $this, 'ajax_delete_record' ] );
         add_action( 'wp_ajax_mdcna_edit_clean_date',  [ $this, 'ajax_edit_clean_date' ] );
         add_action( 'wp_ajax_mdcna_bulk_delete',      [ $this, 'ajax_bulk_delete' ] );
@@ -1241,11 +1242,34 @@ class MDCNA_CDT {
                 <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;min-width:260px">
                     <h3 style="margin-top:0">Delete Test Records</h3>
                     <p style="color:#555">Currently <strong id="mdcna-test-count"><?php echo $test_count; ?></strong> test record(s) in DB.</p>
-                    <button id="mdcna-delete-test" class="button button-secondary" <?php echo $test_count ? '' : 'disabled'; ?>>
+                    <button type="button" id="mdcna-delete-test" class="button button-secondary" <?php echo $test_count ? '' : 'disabled'; ?>>
                         Delete All Test Records
                     </button>
                     <span id="mdcna-delete-status" style="margin-left:10px;font-style:italic;color:#666"></span>
                 </div>
+            </div>
+
+            <!-- Manual Registration Card -->
+            <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;margin-top:20px;max-width:560px">
+                <h3 style="margin-top:0">Add Manual Registration (no payment)</h3>
+                <p style="color:#555;font-size:13px;margin-bottom:16px">Insert a real-looking attendee record without going through the registration form. Useful for adding yourself as an attendee for testing the counter, leaderboard, and email reports.</p>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+                    <label>First Name<br><input type="text" id="mdcna-m-first" class="regular-text" style="width:100%" placeholder="Derek"></label>
+                    <label>Last Name<br><input type="text" id="mdcna-m-last" class="regular-text" style="width:100%" placeholder="Gallardo"></label>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+                    <label>Email<br><input type="email" id="mdcna-m-email" class="regular-text" style="width:100%" placeholder="derekgallardo01@gmail.com"></label>
+                    <label>Phone (optional)<br><input type="text" id="mdcna-m-phone" class="regular-text" style="width:100%" placeholder="555-555-5555"></label>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px">
+                    <label>Clean Date<br><input type="date" id="mdcna-m-date" min="1960-01-01" max="<?php echo date( 'Y-m-d' ); ?>" style="width:100%"></label>
+                    <label>Qty<br><input type="number" id="mdcna-m-qty" value="1" min="1" max="20" style="width:100%"></label>
+                    <label>Donation ($)<br><input type="number" id="mdcna-m-donation" value="0" min="0" step="0.01" style="width:100%"></label>
+                </div>
+
+                <button type="button" id="mdcna-insert-manual" class="button button-primary">Insert Registration</button>
+                <span id="mdcna-manual-status" style="margin-left:10px;font-style:italic;color:#666"></span>
             </div>
 
             <div id="mdcna-test-preview" style="margin-top:16px"></div>
@@ -1285,6 +1309,42 @@ class MDCNA_CDT {
                         $('#mdcna-delete-status').css('color','red').text('Error: ' + res.data);
                         $('#mdcna-delete-test').prop('disabled', false);
                     }
+                });
+            });
+
+            $('#mdcna-insert-manual').on('click', function(){
+                const btn = $(this);
+                const data = {
+                    action:     'mdcna_insert_manual',
+                    nonce:      nonce,
+                    first_name: $('#mdcna-m-first').val().trim(),
+                    last_name:  $('#mdcna-m-last').val().trim(),
+                    email:      $('#mdcna-m-email').val().trim(),
+                    phone:      $('#mdcna-m-phone').val().trim(),
+                    clean_date: $('#mdcna-m-date').val(),
+                    qty:        $('#mdcna-m-qty').val() || 1,
+                    donation:   $('#mdcna-m-donation').val() || 0
+                };
+                if (!data.first_name || !data.last_name || !data.email || !data.clean_date) {
+                    $('#mdcna-manual-status').css('color','red').text('Please fill in name, email, and clean date.');
+                    return;
+                }
+                btn.prop('disabled', true);
+                $('#mdcna-manual-status').css('color','#666').text('Inserting…');
+                $.post(ajaxurl, data, function(res){
+                    if(res.success){
+                        $('#mdcna-manual-status').css('color','green').text('✓ ' + res.data.message);
+                        $('#mdcna-m-first,#mdcna-m-last,#mdcna-m-email,#mdcna-m-phone,#mdcna-m-date').val('');
+                        $('#mdcna-m-qty').val(1);
+                        $('#mdcna-m-donation').val(0);
+                        $('#mdcna-test-preview').html('<p><a href="<?php echo admin_url('admin.php?page=mdcna-cdt'); ?>">View All Registrations →</a></p>');
+                    } else {
+                        $('#mdcna-manual-status').css('color','red').text('Error: ' + res.data);
+                    }
+                    btn.prop('disabled', false);
+                }).fail(function(){
+                    $('#mdcna-manual-status').css('color','red').text('Request failed.');
+                    btn.prop('disabled', false);
                 });
             });
         })(jQuery);
@@ -1357,6 +1417,59 @@ class MDCNA_CDT {
         $deleted = $wpdb->query( "DELETE FROM {$table} WHERE email LIKE '%@mdcna-test.dev'" );
         self::log( "Test data: deleted {$deleted} records." );
         wp_send_json_success( [ 'deleted' => $deleted ] );
+    }
+
+    public function ajax_insert_manual_record(): void {
+        if ( ! current_user_can( 'manage_options' ) || ! wp_verify_nonce( $_POST['nonce'] ?? '', 'mdcna_test_data' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
+
+        $first_name = sanitize_text_field( $_POST['first_name'] ?? '' );
+        $last_name  = sanitize_text_field( $_POST['last_name']  ?? '' );
+        $email      = sanitize_email( $_POST['email'] ?? '' );
+        $phone      = sanitize_text_field( $_POST['phone'] ?? '' );
+        $clean_date = self::parse_clean_date( sanitize_text_field( $_POST['clean_date'] ?? '' ) );
+        $qty        = max( 1, absint( $_POST['qty'] ?? 1 ) );
+        $donation   = max( 0, (float) ( $_POST['donation'] ?? 0 ) );
+
+        if ( ! $first_name || ! $last_name || ! is_email( $email ) || ! $clean_date ) {
+            wp_send_json_error( 'Missing or invalid required fields (name, email, clean date).' );
+        }
+        if ( strtotime( $clean_date ) < strtotime( '1960-01-01' ) ) {
+            wp_send_json_error( 'Clean date must be on or after January 1, 1960.' );
+        }
+
+        global $wpdb;
+        $table   = $wpdb->prefix . MDCNA_CDT_TABLE;
+        $user    = get_user_by( 'email', $email );
+        $user_id = $user ? (int) $user->ID : 0;
+
+        $inserted = $wpdb->insert( $table, [
+            'entry_id'   => 0,
+            'user_id'    => $user_id,
+            'first_name' => $first_name,
+            'last_name'  => $last_name,
+            'email'      => $email,
+            'phone'      => $phone,
+            'clean_date' => $clean_date,
+            'qty'        => $qty,
+            'donation'   => $donation,
+            'merch_json' => '',
+            'raw_data'   => wp_json_encode( [ 'source' => 'manual_admin_insert' ] ),
+            'ip_address' => '',
+            'status'     => 'active',
+        ], [ '%d','%d','%s','%s','%s','%s','%s','%d','%f','%s','%s','%s','%s' ] );
+
+        if ( ! $inserted ) {
+            self::log( "Manual insert failed: " . $wpdb->last_error, 'error' );
+            wp_send_json_error( 'DB insert failed: ' . $wpdb->last_error );
+        }
+
+        self::log( "Manual registration added: {$first_name} {$last_name} <{$email}> clean_date={$clean_date}" );
+        wp_send_json_success( [
+            'message' => "Added {$first_name} {$last_name} ({$email}).",
+            'id'      => $wpdb->insert_id,
+        ] );
     }
 
     // ─────────────────────────────────────────────────────────
