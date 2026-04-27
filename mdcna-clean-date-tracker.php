@@ -65,6 +65,9 @@ class MDCNA_CDT {
         // Fluent Forms submission hook
         add_action( 'fluentform/submission_inserted', [ $this, 'on_ff_submission' ], 10, 3 );
 
+        // Fluent Forms validation — reject clean dates before 1960
+        add_filter( 'fluentform/validation_errors', [ $this, 'validate_ff_clean_date' ], 10, 4 );
+
         // Shortcodes
         add_shortcode( 'mdcna_clean_time',   [ $this, 'shortcode_clean_time' ] );
         add_shortcode( 'mdcna_leaderboard',  [ $this, 'shortcode_leaderboard' ] );
@@ -202,6 +205,13 @@ class MDCNA_CDT {
                 return;
             }
 
+            // Reject clean dates earlier than 1960
+            if ( strtotime( $clean_date ) < strtotime( '1960-01-01' ) ) {
+                self::log( "ERROR: Clean date {$clean_date} is before 1960-01-01 for entry {$entry_id}", 'error' );
+                self::notify_admin_error( "Entry #{$entry_id} rejected — clean date '{$clean_date}' is before January 1, 1960." );
+                return;
+            }
+
             // ── Match / create WP user ────────────────────────
             $user_id = 0;
             if ( $email ) {
@@ -247,6 +257,25 @@ class MDCNA_CDT {
             self::log( "EXCEPTION in on_ff_submission: " . $e->getMessage() . ' | ' . $e->getTraceAsString(), 'error' );
             self::notify_admin_error( 'Exception during form submission processing: ' . $e->getMessage() );
         }
+    }
+
+    /**
+     * Add a validation error if the submitted clean date is earlier than 1960-01-01.
+     * Hooked into fluentform/validation_errors so the user sees the error before submitting.
+     */
+    public function validate_ff_clean_date( $errors, $formData, $form, $fields ) {
+        if ( (int) $form->id !== MDCNA_CDT_FORM_ID ) {
+            return $errors;
+        }
+        $datetime = $formData['datetime'] ?? '';
+        if ( ! $datetime ) {
+            return $errors;
+        }
+        $clean_date = self::parse_clean_date( $datetime );
+        if ( $clean_date && strtotime( $clean_date ) < strtotime( '1960-01-01' ) ) {
+            $errors['datetime'] = [ 'Clean date must be on or after January 1, 1960.' ];
+        }
+        return $errors;
     }
 
     // ─────────────────────────────────────────────────────────
@@ -779,11 +808,11 @@ class MDCNA_CDT {
                             <td class="mdcna-date-cell" data-id="<?php echo (int) $row->id; ?>" data-date="<?php echo esc_attr( $row->clean_date ); ?>">
                                 <span class="mdcna-date-display"><?php echo esc_html( date( 'M j, Y', strtotime( $row->clean_date ) ) ); ?></span>
                                 <span class="mdcna-date-edit-wrap" style="display:none">
-                                    <input type="date" class="mdcna-date-input" value="<?php echo esc_attr( $row->clean_date ); ?>" style="width:130px">
-                                    <button class="button button-small mdcna-date-save" style="margin-left:4px">✓</button>
-                                    <button class="button button-small mdcna-date-cancel" style="margin-left:2px">✕</button>
+                                    <input type="date" class="mdcna-date-input" value="<?php echo esc_attr( $row->clean_date ); ?>" min="1960-01-01" max="<?php echo date( 'Y-m-d' ); ?>" style="width:130px">
+                                    <button type="button" class="button button-small mdcna-date-save" style="margin-left:4px">✓</button>
+                                    <button type="button" class="button button-small mdcna-date-cancel" style="margin-left:2px">✕</button>
                                 </span>
-                                <button class="mdcna-edit-date-btn button-link" title="Edit date" style="margin-left:4px;color:#2271b1;font-size:11px">Edit</button>
+                                <button type="button" class="mdcna-edit-date-btn button-link" title="Edit date" style="margin-left:4px;color:#2271b1;font-size:11px">Edit</button>
                             </td>
                             <td><?php echo esc_html( $label ); ?></td>
                             <td><strong class="mdcna-days-val"><?php echo number_format( $days ); ?></strong></td>
@@ -793,7 +822,7 @@ class MDCNA_CDT {
                             <td style="font-size:11px;color:#666"><?php echo esc_html( date( 'M j, Y', strtotime( $row->created_at ) ) ); ?></td>
                             <td style="font-size:11px;color:#666"><?php echo esc_html( date( 'g:iA', strtotime( $row->created_at ) ) ); ?></td>
                             <td>
-                                <button class="button-link mdcna-delete-btn" data-id="<?php echo (int) $row->id; ?>"
+                                <button type="button" class="button-link mdcna-delete-btn" data-id="<?php echo (int) $row->id; ?>"
                                         style="color:#b32d2e;font-size:12px" title="Delete record">Delete</button>
                             </td>
                         </tr>
@@ -1372,6 +1401,9 @@ class MDCNA_CDT {
         $id         = absint( $_POST['id'] ?? 0 );
         $clean_date = self::parse_clean_date( sanitize_text_field( $_POST['clean_date'] ?? '' ) );
         if ( ! $clean_date ) wp_send_json_error( 'Invalid date — must be in the past.' );
+        if ( strtotime( $clean_date ) < strtotime( '1960-01-01' ) ) {
+            wp_send_json_error( 'Clean date must be on or after January 1, 1960.' );
+        }
         global $wpdb;
         $table = $wpdb->prefix . MDCNA_CDT_TABLE;
         $done  = $wpdb->update( $table, [ 'clean_date' => $clean_date ], [ 'id' => $id ], [ '%s' ], [ '%d' ] );
