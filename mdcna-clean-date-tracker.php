@@ -590,7 +590,7 @@ class MDCNA_CDT {
             </div>
             <div class="mdcna-tt-label">Total Clean Time</div>
             <div class="mdcna-tt-sub">
-                From NA Members who registered for the event
+                From NA Members who have registered for the event
             </div>
         </div>
         <?php
